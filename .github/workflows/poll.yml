@@ -1,0 +1,46 @@
+name: MLBB Poll
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run MLBB bot
+        env:
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          PROMO_LINK:          ${{ secrets.PROMO_LINK }}
+          PROMO_NAME:          ${{ secrets.PROMO_NAME }}
+        run: python main.py
+
+      - name: Commit updated seen.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen.json
+          if git diff --staged --quiet; then
+            echo "No changes to seen.json"
+          else
+            git commit -m "chore: update seen.json [skip ci]"
+            git push
+          fi
