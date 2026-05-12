@@ -1,14 +1,9 @@
 """
-MLBB Auto-Update Telegram Bot
------------------------------
-Watches MLBB news sources, translates new posts into Khmer,
+MLBB Auto-Update Telegram Bot — Cambodia Edition 🇰🇭
+-----------------------------------------------------
+Watches MLBB Cambodia + global news sources, translates new posts into Khmer,
 and forwards them to your Telegram channel with your
 www.nanatopup.com link attached.
-
-Two run modes:
-  - Single run  (GitHub Actions cron):  python main.py
-  - Loop forever (VPS / local PC):      SINGLE_RUN=0 python main.py
-GITHUB_ACTIONS env auto-selects single run.
 """
 
 import os
@@ -24,7 +19,6 @@ import feedparser
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 
-# .env is optional — only used for local testing
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -43,18 +37,41 @@ LOG_FILE      = Path("bot.log")
 IS_GITHUB_ACTIONS = os.getenv("GITHUB_ACTIONS", "").lower() == "true"
 SINGLE_RUN = os.getenv("SINGLE_RUN", "1" if IS_GITHUB_ACTIONS else "0") == "1"
 
+# 🇰🇭 Cambodia-focused MLBB sources
 SOURCES = [
+    # 1. MLBB CAMBODIA YouTube — most important for your audience!
+    {
+        "name": "MLBB Cambodia YouTube 🇰🇭",
+        "type": "rss",
+        "url":  "https://www.youtube.com/feeds/videos.xml?channel_id=UC_AO5MJxx4tBCh5nlMkYoEg",
+    },
+    # 2. MLBB GLOBAL YouTube — main channel, big updates
+    {
+        "name": "MLBB Global YouTube",
+        "type": "rss",
+        "url":  "https://www.youtube.com/feeds/videos.xml?channel_id=UCqmld-BIYME2i_ooRTo1EOg",
+    },
+    # 3. MLBB Esports YouTube — M-Series, tournaments
+    {
+        "name": "MLBB Esports YouTube",
+        "type": "rss",
+        "url":  "https://www.youtube.com/feeds/videos.xml?channel_id=UCEH7P7kyJIkS_gJf93VYbmg",
+    },
+    # 4. MOONTON Official News — patch notes, new heroes, events
+    {
+        "name": "MOONTON Official News",
+        "type": "html",
+        "url":  "https://en.moonton.com/news",
+        "item_selector": "a[href*='/news/']",
+    },
+    # 5. MLBB Mobile News (mirror)
     {
         "name": "MLBB Official News",
         "type": "html",
         "url":  "https://m.mobilelegends.com/en/news",
         "item_selector": "a[href*='/news/']",
     },
-    {
-        "name": "MLBB YouTube",
-        "type": "rss",
-        "url":  "https://www.youtube.com/feeds/videos.xml?user=MobileLegendsOfficial",
-    },
+    # 6. MLBB Wiki — leaks and upcoming content
     {
         "name": "MLBB Wiki Upcoming",
         "type": "html",
@@ -162,9 +179,13 @@ def gather_all() -> list:
     for src in SOURCES:
         try:
             if src["type"] == "rss":
-                out += fetch_rss(src)
+                items = fetch_rss(src)
             elif src["type"] == "html":
-                out += fetch_html(src)
+                items = fetch_html(src)
+            else:
+                items = []
+            log.info(f"  → {src['name']}: {len(items)} items")
+            out += items
         except Exception as e:
             log.exception(f"Source {src['name']} error: {e}")
     return out
@@ -250,9 +271,8 @@ def send_telegram(item: dict, caption: str) -> bool:
 def run_cycle():
     seen = load_seen()
     items = gather_all()
-    log.info(f"Fetched {len(items)} items from {len(SOURCES)} sources")
+    log.info(f"Fetched {len(items)} items total from {len(SOURCES)} sources")
 
-    # First run ever — seed without posting
     if not seen:
         log.info("Empty seen list — seeding without posting")
         for it in items:
@@ -285,10 +305,11 @@ def run_cycle():
 
 
 def main():
-    log.info("=== MLBB Auto-Update Bot ===")
+    log.info("=== MLBB Auto-Update Bot — Cambodia Edition 🇰🇭 ===")
     log.info(f"Mode: {'SINGLE RUN' if SINGLE_RUN else 'LOOP every %d min' % POLL_MINUTES}")
     log.info(f"Channel: {CHANNEL_ID}")
     log.info(f"Promo: {PROMO_LINK}")
+    log.info(f"Watching {len(SOURCES)} sources")
 
     if SINGLE_RUN:
         run_cycle()
