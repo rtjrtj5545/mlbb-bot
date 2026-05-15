@@ -1,8 +1,8 @@
 """
 MLBB Auto-Update Telegram Bot — Cambodia Edition 🇰🇭
 -----------------------------------------------------
-Watches MLBB Cambodia + global news sources, translates new posts into Khmer,
-and forwards them to your Telegram channel with your
+Watches MLBB Cambodia YouTube + MPL Cambodia YouTube, translates new posts
+into Khmer, and forwards them to your Telegram channel with your
 www.nanatopup.com link attached.
 """
 
@@ -11,6 +11,7 @@ import json
 import time
 import logging
 import hashlib
+import html
 import re
 from pathlib import Path
 
@@ -37,46 +38,19 @@ LOG_FILE      = Path("bot.log")
 IS_GITHUB_ACTIONS = os.getenv("GITHUB_ACTIONS", "").lower() == "true"
 SINGLE_RUN = os.getenv("SINGLE_RUN", "1" if IS_GITHUB_ACTIONS else "0") == "1"
 
-# 🇰🇭 Cambodia-focused MLBB sources
+# 🇰🇭 Cambodia-only sources
 SOURCES = [
-    # 1. MLBB CAMBODIA YouTube — most important for your audience!
+    # 1. MLBB Cambodia YouTube — @mobilelegendsbangbangcambodia
     {
         "name": "MLBB Cambodia YouTube 🇰🇭",
         "type": "rss",
         "url":  "https://www.youtube.com/feeds/videos.xml?channel_id=UC_AO5MJxx4tBCh5nlMkYoEg",
     },
-    # 2. MLBB GLOBAL YouTube — main channel, big updates
+    # 2. MPL Cambodia YouTube — @MPLCambodia_Official
     {
-        "name": "MLBB Global YouTube",
+        "name": "MPL Cambodia YouTube 🏆",
         "type": "rss",
-        "url":  "https://www.youtube.com/feeds/videos.xml?channel_id=UCqmld-BIYME2i_ooRTo1EOg",
-    },
-    # 3. MLBB Esports YouTube — M-Series, tournaments
-    {
-        "name": "MLBB Esports YouTube",
-        "type": "rss",
-        "url":  "https://www.youtube.com/feeds/videos.xml?channel_id=UCEH7P7kyJIkS_gJf93VYbmg",
-    },
-    # 4. MOONTON Official News — patch notes, new heroes, events
-    {
-        "name": "MOONTON Official News",
-        "type": "html",
-        "url":  "https://en.moonton.com/news",
-        "item_selector": "a[href*='/news/']",
-    },
-    # 5. MLBB Mobile News (mirror)
-    {
-        "name": "MLBB Official News",
-        "type": "html",
-        "url":  "https://m.mobilelegends.com/en/news",
-        "item_selector": "a[href*='/news/']",
-    },
-    # 6. MLBB Wiki — leaks and upcoming content
-    {
-        "name": "MLBB Wiki Upcoming",
-        "type": "html",
-        "url":  "https://mobile-legends.fandom.com/wiki/Upcoming_content",
-        "item_selector": "h2, h3",
+        "url":  "https://www.youtube.com/feeds/videos.xml?channel_id=UCuB5vb6-ZONbfYUIAXr6EsA",
     },
 ]
 
@@ -90,25 +64,35 @@ log = logging.getLogger("mlbb-bot")
 
 
 # ---------- SEEN STORAGE ----------
-def load_seen() -> set:
+# Stored as an ordered list in JSON. Oldest first, newest last.
+# Trimming is deterministic (always drops oldest, never randomly).
+def load_seen() -> list:
     if SEEN_FILE.exists():
         try:
-            return set(json.loads(SEEN_FILE.read_text(encoding="utf-8")))
+            data = json.loads(SEEN_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return list(data)
         except Exception:
-            return set()
-    return set()
+            pass
+    return []
 
 
-def save_seen(seen: set) -> None:
-    trimmed = list(seen)[-2000:]
+def save_seen(seen_list: list) -> None:
+    trimmed = seen_list[-2000:]
     SEEN_FILE.write_text(
         json.dumps(trimmed, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
 
-def make_id(url: str, title: str) -> str:
-    return hashlib.md5(f"{url}|{title}".encode("utf-8")).hexdigest()
+def make_id(item: dict) -> str:
+    """Prefer the feed's stable entry id (e.g. yt:video:VIDEOID) over hashing
+    title+url — that way fixed typos in a title don't cause re-posts."""
+    fid = item.get("feed_id") or ""
+    if fid:
+        return fid
+    raw = f"{item.get('url','')}|{item.get('title','')}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 # ---------- FETCHERS ----------
@@ -129,17 +113,19 @@ def fetch_rss(src: dict) -> list:
         elif "media_content" in entry and entry.media_content:
             media = entry.media_content[0].get("url")
         items.append({
-            "title":  entry.get("title", "").strip(),
-            "url":    entry.get("link", "").strip(),
+            "title":   entry.get("title", "").strip(),
+            "url":     entry.get("link", "").strip(),
             "summary": BeautifulSoup(entry.get("summary", ""), "html.parser")
                        .get_text(" ", strip=True)[:400],
-            "image":  media,
-            "source": src["name"],
+            "image":   media,
+            "source":  src["name"],
+            "feed_id": entry.get("id", "").strip(),   # YouTube → yt:video:XXXX
         })
     return items
 
 
 def fetch_html(src: dict) -> list:
+    """Kept for future use if you want to add a non-RSS source again."""
     items = []
     try:
         r = requests.get(src["url"], headers=HEADERS, timeout=20)
@@ -150,13 +136,15 @@ def fetch_html(src: dict) -> list:
 
     soup = BeautifulSoup(r.text, "html.parser")
     nodes = soup.select(src["item_selector"])[:15]
+    base = re.match(r"https?://[^/]+", src["url"]).group(0)
     for n in nodes:
         title = n.get_text(" ", strip=True)
         href  = n.get("href", "") if n.name == "a" else ""
         if not title or len(title) < 5:
             continue
-        if href and href.startswith("/"):
-            base = re.match(r"https?://[^/]+", src["url"]).group(0)
+        if href.startswith("//"):
+            href = "https:" + href
+        elif href.startswith("/"):
             href = base + href
         img = n.find("img") or (n.parent.find("img") if n.parent else None)
         img_url = None
@@ -164,12 +152,15 @@ def fetch_html(src: dict) -> list:
             img_url = img["src"]
             if img_url.startswith("//"):
                 img_url = "https:" + img_url
+            elif img_url.startswith("/"):
+                img_url = base + img_url
         items.append({
-            "title":  title[:200],
-            "url":    href or src["url"],
+            "title":   title[:200],
+            "url":     href or src["url"],
             "summary": "",
-            "image":  img_url,
-            "source": src["name"],
+            "image":   img_url,
+            "source":  src["name"],
+            "feed_id": "",
         })
     return items
 
@@ -206,7 +197,11 @@ def translate_khmer(text: str) -> str:
         if buf:
             chunks.append(buf.strip())
         translated = [GoogleTranslator(source="auto", target="km").translate(c) for c in chunks]
-        return " ".join(translated).strip()
+        result = " ".join(t for t in translated if t).strip()
+        # If we got back exactly what we sent, the translator is probably rate-limited.
+        if result and result.lower() == text.lower():
+            log.warning("Translation returned identical text — likely rate-limited.")
+        return result or text
     except Exception as e:
         log.warning(f"Translation failed: {e}")
         return text
@@ -218,14 +213,23 @@ def tg_api(method: str) -> str:
 
 
 def build_caption(item: dict, khmer_title: str, khmer_summary: str) -> str:
-    parts = [f"🎮 <b>{khmer_title}</b>", ""]
-    if khmer_summary:
-        parts += [khmer_summary[:600], ""]
+    # All text that goes inside HTML must be escaped — otherwise a stray '<'
+    # or '&' from the translator/source will make Telegram reject the message.
+    title_safe       = html.escape(khmer_title or item["title"])
+    summary_safe     = html.escape(khmer_summary) if khmer_summary else ""
+    source_safe      = html.escape(item["source"])
+    url_safe         = html.escape(item["url"], quote=True)
+    promo_link_safe  = html.escape(PROMO_LINK, quote=True)
+    promo_name_safe  = html.escape(PROMO_NAME)
+
+    parts = [f"🎮 <b>{title_safe}</b>", ""]
+    if summary_safe:
+        parts += [summary_safe[:600], ""]
     parts += [
-        f"🔗 ប្រភព / Source: {item['source']}",
-        f"📰 <a href=\"{item['url']}\">អានបន្ថែម / Read more</a>",
+        f"🔗 ប្រភព / Source: {source_safe}",
+        f"📰 <a href=\"{url_safe}\">អានបន្ថែម / Read more</a>",
         "",
-        f"💎 បញ្ចូលពេជ្រ MLBB តម្លៃថោក 👉 <a href=\"{PROMO_LINK}\">{PROMO_NAME}</a>",
+        f"💎 បញ្ចូលពេជ្រ MLBB តម្លៃថោក 👉 <a href=\"{promo_link_safe}\">{promo_name_safe}</a>",
         f"🌐 {PROMO_LINK}",
     ]
     return "\n".join(parts)
@@ -256,8 +260,10 @@ def send_telegram(item: dict, caption: str) -> bool:
             return True
         log.warning(f"Telegram error {r.status_code}: {r.text[:300]}")
 
+        # Fallback: if photo upload failed, try the same caption as a text message.
         if image:
             payload.pop("photo", None)
+            payload.pop("caption", None)
             payload["text"] = caption[:4096]
             r = requests.post(tg_api("sendMessage"), data=payload, timeout=30)
             return r.status_code == 200 and r.json().get("ok", False)
@@ -269,22 +275,26 @@ def send_telegram(item: dict, caption: str) -> bool:
 
 # ---------- CYCLE ----------
 def run_cycle():
-    seen = load_seen()
+    seen_list = load_seen()
+    seen_set  = set(seen_list)
     items = gather_all()
     log.info(f"Fetched {len(items)} items total from {len(SOURCES)} sources")
 
-    if not seen:
+    if not seen_list:
         log.info("Empty seen list — seeding without posting")
         for it in items:
-            seen.add(make_id(it["url"], it["title"]))
-        save_seen(seen)
-        log.info(f"Seeded {len(seen)} items. Next run will post NEW updates.")
+            uid = make_id(it)
+            if uid not in seen_set:
+                seen_set.add(uid)
+                seen_list.append(uid)
+        save_seen(seen_list)
+        log.info(f"Seeded {len(seen_list)} items. Next run will post NEW updates.")
         return
 
     new_count = 0
     for it in items:
-        uid = make_id(it["url"], it["title"])
-        if uid in seen:
+        uid = make_id(it)
+        if uid in seen_set:
             continue
 
         log.info(f"NEW: [{it['source']}] {it['title'][:80]}")
@@ -294,9 +304,10 @@ def run_cycle():
         caption = build_caption(it, khmer_title, khmer_summary)
 
         if send_telegram(it, caption):
-            seen.add(uid)
+            seen_set.add(uid)
+            seen_list.append(uid)
             new_count += 1
-            save_seen(seen)
+            save_seen(seen_list)
             time.sleep(3)
         else:
             log.warning("Send failed, will retry next cycle")
